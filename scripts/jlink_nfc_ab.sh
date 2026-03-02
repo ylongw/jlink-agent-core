@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Example only: quick hardware loop for one board.
-# Real dual-board orchestration should be done in project-specific script.
+# Example one-board loop: flash + resolve RTT address + capture RTT.
+# Usage:
+#   SN=801039104 HEX=/path/fw.hex MAP=/path/fw.map bash scripts/jlink_nfc_ab.sh
 
 DEVICE="${DEVICE:-STM32H747XI_M7}"
 SN="${SN:?SN is required}"
@@ -11,15 +12,15 @@ MAP="${MAP:?MAP is required}"
 LOG="${LOG:-/tmp/jlink_skill_rtt.log}"
 DURATION="${DURATION:-20}"
 
-python3 -m jlink_agent_core.cli flash \
+python3 scripts/jlink_agent.py flash \
   --device "$DEVICE" \
   --serial "$SN" \
   --firmware "$HEX" \
   --json
 
-ADDR=$(python3 -m jlink_agent_core.cli rtt-addr --map "$MAP" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["address"])')
+ADDR=$(python3 scripts/jlink_agent.py rtt-addr --map "$MAP" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["address"])')
 
-python3 -m jlink_agent_core.cli rtt-capture \
+python3 scripts/jlink_agent.py rtt-capture \
   --device "$DEVICE" \
   --serial "$SN" \
   --address "$ADDR" \
