@@ -56,6 +56,20 @@ jlink-agent rtt-capture \
   --json
 ```
 
+## OpenClaw Skill (bundled in this repo)
+
+The OpenClaw wrapper skill is included at:
+
+- `skills/openclaw/jlink-debug/`
+
+Install it with one command:
+
+```bash
+bash scripts/install_openclaw_skill.sh
+```
+
+Then OpenClaw can invoke J-Link flows via the same core CLI in this repository.
+
 ## Agent Integration Pattern
 
 Recommended orchestration:
