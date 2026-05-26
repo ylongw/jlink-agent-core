@@ -9,7 +9,8 @@ Agent-friendly J-Link automation. All commands support `--json` for machine-read
 
 ## Prerequisites
 
-- `JLinkExe`, `JLinkGDBServer`, `JLinkRTTLogger` in PATH (SEGGER J-Link Software Pack)
+- `JLinkExe`, `JLinkGDBServer` in PATH (SEGGER J-Link Software Pack). `JLinkRTTLogger`
+  is **NOT** used — see [RTT notes](#rtt-known-issues--buffer-tuning).
 - `arm-none-eabi-gdb` in PATH for `gdb-batch`
 - Python 3.9+ (no external deps)
 
@@ -77,14 +78,62 @@ python3 scripts/jlink_agent.py gdbserver-stop --json
 ### 5. Capture RTT logs to a file
 
 ```bash
-# Requires JLinkGDBServer to NOT be running (RTTLogger opens its own session)
+# Stops any pre-existing JLinkGDBServer to free the ports, spawns a
+# transient one with -rtt -rttsearchaddr, drains the RTT telnet port,
+# then tears down. Don't run concurrently with gdbserver-start / gdb-batch.
 python3 scripts/jlink_agent.py rtt-capture \
   --device ONEKEYH7 --serial 801039104 \
   --address 0x24008410 \
   --out /tmp/boot.log --duration 20 --speed 12000 --json
 ```
 
-Then read the resulting file with the `Read` tool — cleaner than interactive `JLinkRTTClient`.
+`--address` is the `_SEGGER_RTT` control-block address; resolve it via
+`rtt-addr` (it shifts every build, so don't hard-code).
+
+Then read the resulting file with the `Read` tool. Output JSON includes
+`"via": "gdbserver_telnet"` to confirm the transport used.
+
+#### RTT known issues + buffer tuning
+
+> Read this section before assuming RTT is "broken".
+
+**1. `JLinkRTTLogger` does NOT work on J-Link Software V8.96+.** It
+silently ignores `-RTTAddress` and `-RTTSearchRanges` and reports
+"RTT Control Block not found" even when the address is verifiably
+correct (verify with `JLinkExe ... mem <addr> 0x40` — the "SEGGER RTT"
+magic is right there). This skill's `rtt-capture` works around this by
+going through `JLinkGDBServer -rtt -rttsearchaddr` + a socket read of
+the RTT telnet port. **Do not** fall back to `JLinkRTTLogger` thinking
+it's "simpler" — it will look exactly the same as a probe / address
+problem and waste an hour.
+
+**2. `nc localhost <rtt-port>` exits on first EOF / banner.** If you're
+manually inspecting the RTT telnet stream (instead of using
+`rtt-capture`), use a Python socket reader with reconnect, not `nc`:
+
+```python
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(("localhost", 19021))
+s.settimeout(1.0)
+with open("/tmp/rtt.log", "wb", buffering=0) as f:
+    while True:
+        try:    f.write(s.recv(4096))
+        except socket.timeout: continue
+```
+
+**3. RTT default `BUFFER_SIZE_UP = 1024` + `SEGGER_RTT_MODE_NO_BLOCK_SKIP`
+silently drops logs during boot bursts.** The host drain rate over SWD
+is finite (~tens of KB/s); LVGL / display init can emit several KB in
+one tick. Symptom: early-boot logs from one task show up, others (e.g.
+the FG task starting right when buffer is full) don't, even though
+their format strings are clearly in the `.elf`. To debug
+boot-window code, bump `BUFFER_SIZE_UP` to 16384 in
+`hal/segger_sysview/SEGGER_RTT_Conf.h` and rebuild — and remember to
+revert before shipping (it eats AXI SRAM).
+
+**4. Address shifts every build.** Always re-run `rtt-addr` after a
+rebuild; don't reuse the address from a previous session.
 
 ### 6. gdb-batch — breakpoints, stepping, variable/register inspection
 
@@ -210,8 +259,12 @@ On timeout the skill returns `{"ok": false, "timeout": true, ...}` with whatever
 
 - Never flash without explicit board-to-SN mapping (`--serial`).
 - `gdb-batch` halts the CPU on connect — your firmware will be paused until gdb exits. Pass `--no-halt` only when you deliberately want to observe a running system (rare).
-- Only one J-Link session at a time: `rtt-capture`, `flash`, and `gdbserver-*`/`gdb-batch` cannot run simultaneously. Stop one before starting the other.
-- If RTT log is empty, diagnose infra first (wrong SN, wrong RTT address, logger timing).
+- Only one J-Link session at a time: `rtt-capture`, `flash`, and `gdbserver-*`/`gdb-batch` cannot run simultaneously. Stop one before starting the other. `rtt-capture` will auto-kill stale `JLinkGDBServer` to free the ports.
+- If RTT log is empty, diagnose in this order:
+  1. Re-resolve `--address` via `rtt-addr` — it shifts every build.
+  2. Verify the magic with `JLinkExe ... mem <addr> 0x10` — first 10 bytes must be `"SEGGER RTT"`.
+  3. Re-read [RTT known issues](#rtt-known-issues--buffer-tuning). Do NOT try `JLinkRTTLogger` directly; it's the broken path this skill specifically works around.
+  4. If the firmware has just been re-flashed and a previous `JLinkGDBServer` is still alive, kill it (`gdbserver-stop`) before re-capturing — the old session may be holding a stale RTT control-block pointer.
 - Prefer JSON output in automation.
 
 ## Scripts

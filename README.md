@@ -142,7 +142,7 @@ Tested with STM32H747XI (Cortex-M7) but works with any J-Link-supported MCU:
 
 - Never flash without explicit board-to-serial-number mapping
 - If RTT log is empty, check: wrong SN? wrong RTT address? logger timing?
-- `--speed` defaults: flash=4000 kHz, GDB/RTT=12000 kHz
+- `--speed` default: 12000 kHz (flash / GDB / RTT)
 
 ## Project Structure
 

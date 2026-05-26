@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -27,7 +28,7 @@ def _ensure_tool(tool: str) -> None:
 
 def cmd_probe() -> dict:
     _ensure_tool("JLinkExe")
-    proc = _run(["bash", "-lc", "JLinkExe -CommandFile /dev/stdin <<'EOF'\nShowEmuList\nexit\nEOF"])
+    proc = _run(["bash", "-lc", "JLinkExe -NoGui 1 -CommandFile /dev/stdin <<'EOF'\nShowEmuList\nexit\nEOF"])
     raw = (proc.stdout or "") + (proc.stderr or "")
     sns = sorted(set(re.findall(r"\b\d{9}\b", raw)))
     return {"ok": True, "serial_numbers": sns, "raw": raw}
@@ -47,6 +48,7 @@ def cmd_flash(device: str, serial: str, firmware: str, speed: int) -> dict:
     try:
         proc = _run([
             "JLinkExe",
+            "-NoGui", "1",
             "-device", device,
             "-if", "SWD",
             "-speed", str(speed),
@@ -105,34 +107,116 @@ def cmd_gdbserver_stop() -> dict:
     return {"ok": True}
 
 
-def cmd_rtt_capture(device: str, serial: str, address: str, out_file: str, duration: int, speed: int) -> dict:
-    _ensure_tool("JLinkRTTLogger")
+def cmd_rtt_capture(device: str, serial: str, address: str, out_file: str, duration: int, speed: int,
+                    gdb_port: int = 50000, rtt_port: int = 19021) -> dict:
+    """Capture RTT for `duration` seconds via JLinkGDBServer + telnet socket.
+
+    Why not JLinkRTTLogger: on J-Link Software V8.96 (Dec 2025) JLinkRTTLogger
+    silently ignores ``-RTTAddress`` / ``-RTTSearchRanges`` and reports
+    "RTT Control Block not found" even when the address is verifiably
+    correct (confirmed via JLinkExe ``mem`` dump showing the "SEGGER RTT"
+    magic at the requested address). JLinkGDBServer's ``-rtt
+    -rttsearchaddr`` flag set goes through a different RTT implementation
+    and honours the explicit address. We spin up a transient GDBServer,
+    open the RTT telnet port, drain it into a file, then tear down.
+
+    Side effect: kills any pre-existing JLinkGDBServer to free the port.
+    Caller must not have a parallel GDB session — this is a capture, not
+    a debug session.
+    """
+    _ensure_tool("JLinkGDBServer")
     out = Path(out_file).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "JLinkRTTLogger",
-        "-Device", device,
-        "-If", "SWD",
-        "-Speed", str(speed),
-        "-SelectEmuBySN", serial,
-        "-RTTChannel", "0",
-        "-RTTAddress", address,
-        str(out),
+    # Kill any stale GDBServer to free the gdb_port / rtt_port.
+    _run(["bash", "-lc", "pkill -f JLinkGDBServer || true"])
+    time.sleep(1.0)
+
+    gdb_cmd = [
+        "JLinkGDBServer",
+        "-nogui",
+        "-if", "swd",
+        "-port", str(gdb_port),
+        "-RTTTelnetPort", str(rtt_port),
+        "-device", device,
+        "-speed", str(speed),
+        "-select", f"USB={serial}",
+        "-rtt",
+        "-rttsearchaddr", address,
+        "-rttsearchranges", f"{address} 0x10000",
     ]
+    gdb_proc = subprocess.Popen(gdb_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        time.sleep(max(1, duration))
-    finally:
-        if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+        # Wait up to 5s for the RTT telnet port to accept connections.
+        sock: socket.socket | None = None
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
             try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1.0)
+                sock.connect(("localhost", rtt_port))
+                break
+            except (ConnectionRefusedError, socket.timeout, OSError):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                sock = None
+                time.sleep(0.25)
 
-    return {"ok": out.exists(), "output_file": str(out), "bytes": out.stat().st_size if out.exists() else 0}
+        if sock is None:
+            return {
+                "ok": False,
+                "error": f"GDBServer RTT telnet port {rtt_port} not reachable within 5s",
+                "via": "gdbserver_telnet",
+            }
+
+        # Drain for `duration` seconds. Reconnect transparently if the
+        # server closes the socket (rare, but happens after long idles).
+        sock.settimeout(0.5)
+        end = time.time() + duration
+        with open(out, "wb", buffering=0) as f:
+            while time.time() < end:
+                try:
+                    data = sock.recv(4096)
+                    if not data:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(0.5)
+                            sock.connect(("localhost", rtt_port))
+                        except OSError:
+                            time.sleep(0.5)
+                            continue
+                        continue
+                    f.write(data)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+        return {
+            "ok": out.exists() and out.stat().st_size > 0,
+            "output_file": str(out),
+            "bytes": out.stat().st_size if out.exists() else 0,
+            "via": "gdbserver_telnet",
+        }
+    finally:
+        if gdb_proc.poll() is None:
+            gdb_proc.send_signal(signal.SIGTERM)
+            try:
+                gdb_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                gdb_proc.kill()
 
 
 def cmd_gdb_batch(elf: str,
@@ -214,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--device", required=True)
     sp.add_argument("--serial", required=True)
     sp.add_argument("--firmware", required=True)
-    sp.add_argument("--speed", type=int, default=4000)
+    sp.add_argument("--speed", type=int, default=12000)
 
     sp = sub.add_parser("rtt-addr", help="read _SEGGER_RTT address from map file")
     add_json_arg(sp)
@@ -233,14 +317,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("gdbserver-stop", help="stop JLinkGDBServer")
     add_json_arg(sp)
 
-    sp = sub.add_parser("rtt-capture", help="capture RTT logs via JLinkRTTLogger")
+    sp = sub.add_parser("rtt-capture",
+        help="capture RTT logs via GDBServer + telnet (workaround for broken JLinkRTTLogger -RTTAddress on V8.96+)")
     add_json_arg(sp)
     sp.add_argument("--device", required=True)
     sp.add_argument("--serial", required=True)
-    sp.add_argument("--address", required=True)
+    sp.add_argument("--address", required=True,
+        help="_SEGGER_RTT control-block address (resolve via `rtt-addr` from the map file)")
     sp.add_argument("--out", required=True)
     sp.add_argument("--duration", type=int, default=30)
     sp.add_argument("--speed", type=int, default=12000)
+    sp.add_argument("--gdb-port", type=int, default=50000,
+        help="port for the transient GDBServer (default 50000). Killed at end.")
+    sp.add_argument("--rtt-port", type=int, default=19021,
+        help="GDBServer's RTT telnet port (default 19021). The capture reads from here.")
 
     sp = sub.add_parser("gdb-batch",
         help="run gdb in batch mode against a running gdb server (breakpoints/step/print/regs)")
@@ -288,7 +378,8 @@ def main() -> int:
         elif args.cmd == "gdbserver-stop":
             out = cmd_gdbserver_stop()
         elif args.cmd == "rtt-capture":
-            out = cmd_rtt_capture(args.device, args.serial, args.address, args.out, args.duration, args.speed)
+            out = cmd_rtt_capture(args.device, args.serial, args.address, args.out, args.duration, args.speed,
+                                  args.gdb_port, args.rtt_port)
         elif args.cmd == "gdb-batch":
             if args.commands and args.script:
                 raise JLinkError("--commands and --script are mutually exclusive")
