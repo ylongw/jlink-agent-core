@@ -37,14 +37,14 @@ If only one J-Link is connected, first run `probe` to get the serial number; pas
 ### 1. Probe detection
 
 ```bash
-python3 scripts/jlink_agent.py probe --json
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py probe --json
 # → {"ok": true, "serial_numbers": ["801039104"], ...}
 ```
 
 ### 2. Flash firmware (JLinkExe loadfile)
 
 ```bash
-python3 scripts/jlink_agent.py flash \
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py flash \
   --device ONEKEYH7 \
   --serial 801039104 \
   --firmware .build/arm-toolchain-debug/executables/apps/core/core.hex \
@@ -57,7 +57,7 @@ Uses a `r / h / loadfile / r / g / exit` JLinkExe script — simpler and more re
 ### 3. Resolve RTT address from map file
 
 ```bash
-python3 scripts/jlink_agent.py rtt-addr \
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py rtt-addr \
   --map .build/arm-toolchain-debug/executables/apps/core/core.map \
   --json
 # → {"ok": true, "address": "0x24008410"}
@@ -67,12 +67,12 @@ python3 scripts/jlink_agent.py rtt-addr \
 
 ```bash
 # Start (background by default)
-python3 scripts/jlink_agent.py gdbserver-start \
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py gdbserver-start \
   --device ONEKEYH7 --serial 801039104 \
   --gdb-port 50000 --rtt-port 19021 --speed 12000 --json
 
 # Stop any running instance
-python3 scripts/jlink_agent.py gdbserver-stop --json
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py gdbserver-stop --json
 ```
 
 ### 5. Capture RTT logs to a file
@@ -81,7 +81,7 @@ python3 scripts/jlink_agent.py gdbserver-stop --json
 # Stops any pre-existing JLinkGDBServer to free the ports, spawns a
 # transient one with -rtt -rttsearchaddr, drains the RTT telnet port,
 # then tears down. Don't run concurrently with gdbserver-start / gdb-batch.
-python3 scripts/jlink_agent.py rtt-capture \
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py rtt-capture \
   --device ONEKEYH7 --serial 801039104 \
   --address 0x24008410 \
   --out /tmp/boot.log --duration 20 --speed 12000 --json
@@ -144,7 +144,7 @@ Prerequisite: a `JLinkGDBServer` is already listening on `--gdb-port`. Start one
 #### Inline commands
 
 ```bash
-python3 scripts/jlink_agent.py gdb-batch \
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py gdb-batch \
   --elf .build/arm-toolchain-debug/executables/apps/core/core.elf \
   --gdb /Users/wangyunlong/onekey_toolchains/arm-gnu-toolchain-15.2.rel1/bin/arm-none-eabi-gdb \
   --gdb-port 50000 \
@@ -190,7 +190,7 @@ end
 continue
 EOF
 
-python3 scripts/jlink_agent.py gdb-batch \
+python3 /Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py gdb-batch \
   --elf core.elf --gdb arm-none-eabi-gdb --gdb-port 50000 \
   --script /tmp/debug.gdb --timeout 20 --json
 ```
@@ -269,5 +269,5 @@ On timeout the skill returns `{"ok": false, "timeout": true, ...}` with whatever
 
 ## Scripts
 
-- `scripts/jlink_agent.py` — main CLI wrapper.
-- `scripts/jlink_nfc_ab.sh` — example orchestration script for one-board flash+RTT.
+- `/Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_agent.py` — main CLI wrapper.
+- `/Users/wangyunlong/.claude/skills/jlink-debug/scripts/jlink_nfc_ab.sh` — example orchestration script for one-board flash+RTT.

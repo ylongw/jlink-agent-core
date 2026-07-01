@@ -34,7 +34,7 @@ def cmd_probe() -> dict:
     return {"ok": True, "serial_numbers": sns, "raw": raw}
 
 
-def cmd_flash(device: str, serial: str, firmware: str, speed: int) -> dict:
+def cmd_flash(device: str, serial: str, firmware: str, speed: int, jlinkscript: str | None = None) -> dict:
     _ensure_tool("JLinkExe")
     fw = Path(firmware).expanduser().resolve()
     if not fw.exists():
@@ -46,7 +46,7 @@ def cmd_flash(device: str, serial: str, firmware: str, speed: int) -> dict:
         script_path = tf.name
 
     try:
-        proc = _run([
+        jlink_cmd = [
             "JLinkExe",
             "-NoGui", "1",
             "-device", device,
@@ -54,8 +54,16 @@ def cmd_flash(device: str, serial: str, firmware: str, speed: int) -> dict:
             "-speed", str(speed),
             "-USB", serial,
             "-AutoConnect", "1",
-            "-CommandFile", script_path,
-        ], timeout=120)
+        ]
+        if jlinkscript:
+            js = Path(jlinkscript).expanduser().resolve()
+            if not js.exists():
+                raise JLinkError(f"JLinkScript not found: {js}")
+            # InitTarget() in this script brings up FMC/SDRAM, required so
+            # loadfile can write the SDRAM UI-code segment (@0xD0400000).
+            jlink_cmd += ["-JLinkScriptFile", str(js)]
+        jlink_cmd += ["-CommandFile", script_path]
+        proc = _run(jlink_cmd, timeout=120)
         out = (proc.stdout or "") + (proc.stderr or "")
         ok = ("O.K." in out) and proc.returncode == 0
         return {"ok": ok, "returncode": proc.returncode, "output": out}
@@ -299,6 +307,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--serial", required=True)
     sp.add_argument("--firmware", required=True)
     sp.add_argument("--speed", type=int, default=12000)
+    sp.add_argument("--jlinkscript",
+        default="",
+        help="JLinkScript whose InitTarget() inits FMC/SDRAM — required to flash the SDRAM UI-code segment (@0xD0400000). Empty = none (default).")
 
     sp = sub.add_parser("rtt-addr", help="read _SEGGER_RTT address from map file")
     add_json_arg(sp)
@@ -370,7 +381,7 @@ def main() -> int:
         if args.cmd == "probe":
             out = cmd_probe()
         elif args.cmd == "flash":
-            out = cmd_flash(args.device, args.serial, args.firmware, args.speed)
+            out = cmd_flash(args.device, args.serial, args.firmware, args.speed, args.jlinkscript)
         elif args.cmd == "rtt-addr":
             out = cmd_rtt_addr(args.map, args.symbol)
         elif args.cmd == "gdbserver-start":
